@@ -6,7 +6,7 @@ set -euxo pipefail
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
 CTX=262144                   # used when YARN=0 (native, no RoPE scaling)
-YARN=1                       # 1 = 2x YaRN to 524288 (fits A100 80GB with f16 KV)
+YARN=1                       # 1 = YaRN: 524288 on 1x80GB, 1048576 on 2x80GB (f16 KV)
 ################################################################
 
 REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -60,17 +60,27 @@ dl() { # filename expected_bytes
 dl "$MODEL_FILE" "$MODEL_SIZE"
 dl "$MMPROJ_FILE" "$MMPROJ_SIZE"
 
+GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
 EXTRA_ARGS=()
 if [ "$YARN" = "1" ]; then
-  CTX=524288
-  # 2x YaRN: f16 KV is ~32 GB, ~62 GB total with Q8_0 + vision — fits 80GB.
-  # 3x (786k) is ~48 GB KV and too tight. 4x/1M needs q8 KV or it OOMs.
   # override-kv: llama-server otherwise caps slots at n_ctx_train (262144).
-  EXTRA_ARGS=(
-    --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
-    --flash-attn on
-    --override-kv qwen35.context_length=int:524288
-  )
+  # 1x80GB: 2x YaRN, f16 KV ~32 GB, ~62 GB total.
+  # 2x80GB: 4x YaRN / 1M, f16 KV ~64 GB split across GPUs (~94 GB total < 160).
+  if [ "$GPU_COUNT" -ge 2 ]; then
+    CTX=1048576
+    EXTRA_ARGS=(
+      --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
+      --flash-attn on --tensor-split 1,1
+      --override-kv qwen35.context_length=int:1048576
+    )
+  else
+    CTX=524288
+    EXTRA_ARGS=(
+      --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
+      --flash-attn on
+      --override-kv qwen35.context_length=int:524288
+    )
+  fi
 fi
 
 docker rm -f llama 2>/dev/null || true
