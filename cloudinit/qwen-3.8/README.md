@@ -55,7 +55,43 @@ Point any OpenAI-compatible client (e.g. Cline "OpenAI Compatible") at it:
 - Base URL: `http://<instance-ip>:8080/v1`
 - API key: your token
 - Model ID: `qwen3.8-27b-uncensored`
-- Context: 262144 (image input supported — vision projector is loaded)
+- Context: 262144 native (image input supported — vision projector is loaded). Set `YARN=1` for 1,048,576 (see below).
+
+## YaRN / 1M context
+
+Qwen3.8 natively trains at **262,144**. Unsloth/Qwen document a **4× YaRN** extension to **1,048,576**. That is RoPE scaling, not a different GGUF — same weights.
+
+**Hardware does change**, because llama.cpp pre-allocates the KV cache for `-c`. Weights stay ~29 GB (Q8_0) + ~0.9 GB vision. Only 16 of 64 layers are full attention (4 KV heads × dim 256), so KV is ~64 KiB/token at f16:
+
+| Context | KV cache (f16) | KV cache (q8_0) | Q8_0 + vision + KV (approx) | A100 80GB |
+|---|---:|---:|---:|---|
+| 262,144 (native) | ~16 GB | ~8 GB | ~46 GB (f16 KV) | fits, current default |
+| 1,048,576 (YaRN 4×) | ~64 GB | ~32 GB | ~94 GB (f16) / ~62 GB (q8) | f16 **OOM**; q8 KV is the 80GB path |
+
+The 48 Gated DeltaNet layers keep a small constant state (~tens of MiB), not a 1M cache.
+
+Qwen also warns that **static YaRN can hurt short-context quality**, so it is off by default. To enable on a new box, set `YARN=1` at the top of the script (forces `-c 1048576`, `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144`, flash-attn, q8 KV, and a `qwen35.context_length` override so llama-server does not cap slots at 262k).
+
+Already-running container (no re-download):
+
+```bash
+API_KEY=$(sudo cat /root/llama-api-key.txt)
+docker rm -f llama
+docker run -d --name llama --restart unless-stopped --gpus all \
+  -p 8080:8080 -v /models:/models \
+  ghcr.io/ggml-org/llama.cpp:server-cuda \
+  -m /models/Qwen3.8-27B-Uncensored-Q8_0.gguf \
+  --mmproj /models/Qwen3.8-27B-Uncensored-vision-f16.gguf \
+  --host 0.0.0.0 --port 8080 --api-key "$API_KEY" \
+  -ngl 999 -c 1048576 --jinja --alias qwen3.8-27b-uncensored \
+  --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144 \
+  --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
+  --override-kv qwen35.context_length=int:1048576
+```
+
+Prefill of a million tokens is slow even when VRAM fits. For Cline, 262k already covers the ~66k failure; only turn YaRN on if you actually need past 256k.
+
+Then set Cline's context window to **1048576**.
 
 ## Logs
 

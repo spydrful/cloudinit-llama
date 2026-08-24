@@ -5,7 +5,8 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=262144                   # model native max; Q8_0 + vision on 80GB A100
+CTX=262144                   # native max without YaRN; Q8_0 + vision on 80GB A100
+YARN=0                       # 1 = 4x YaRN to 1,048,576 (see README: KV cache, not weights)
 ################################################################
 
 REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -59,6 +60,18 @@ dl() { # filename expected_bytes
 dl "$MODEL_FILE" "$MODEL_SIZE"
 dl "$MMPROJ_FILE" "$MMPROJ_SIZE"
 
+EXTRA_ARGS=()
+if [ "$YARN" = "1" ]; then
+  CTX=1048576
+  # q8 KV is required on 80GB — f16 KV at 1M is ~64 GB and OOMs with Q8_0 weights.
+  # override-kv: llama-server otherwise caps slots at n_ctx_train (262144).
+  EXTRA_ARGS=(
+    --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
+    --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0
+    --override-kv qwen35.context_length=int:1048576
+  )
+fi
+
 docker rm -f llama 2>/dev/null || true
 docker run -d --name llama --restart unless-stopped --gpus all \
   -p "${PORT}:8080" -v /models:/models \
@@ -68,6 +81,7 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --host 0.0.0.0 --port 8080 \
   --api-key "$API_KEY" \
   -ngl 999 -c "$CTX" --jinja \
-  --alias qwen3.8-27b-uncensored
+  --alias qwen3.8-27b-uncensored \
+  "${EXTRA_ARGS[@]}"
 
 echo "DONE. API key: $API_KEY"
