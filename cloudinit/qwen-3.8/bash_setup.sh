@@ -5,8 +5,8 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=262144                   # native max without YaRN; Q8_0 + vision on 80GB A100
-YARN=0                       # 1 = 4x YaRN to 1,048,576 (see README: KV cache, not weights)
+CTX=262144                   # used when YARN=0 (native, no RoPE scaling)
+YARN=1                       # 1 = 2x YaRN to 524288 (fits A100 80GB with f16 KV)
 ################################################################
 
 REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -62,13 +62,14 @@ dl "$MMPROJ_FILE" "$MMPROJ_SIZE"
 
 EXTRA_ARGS=()
 if [ "$YARN" = "1" ]; then
-  CTX=1048576
-  # q8 KV is required on 80GB — f16 KV at 1M is ~64 GB and OOMs with Q8_0 weights.
+  CTX=524288
+  # 2x YaRN: f16 KV is ~32 GB, ~62 GB total with Q8_0 + vision — fits 80GB.
+  # 3x (786k) is ~48 GB KV and too tight. 4x/1M needs q8 KV or it OOMs.
   # override-kv: llama-server otherwise caps slots at n_ctx_train (262144).
   EXTRA_ARGS=(
-    --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
-    --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0
-    --override-kv qwen35.context_length=int:1048576
+    --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
+    --flash-attn on
+    --override-kv qwen35.context_length=int:524288
   )
 fi
 
