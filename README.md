@@ -11,7 +11,8 @@ NVIDIA + Debian-based hosts (Ubuntu 22.04/24.04) and are tuned for 80 GB cards
 
 | Folder | What it deploys | GPU |
 |---|---|---|
-| [`cloudinit/`](cloudinit/) | `llama.cpp` OpenAI-compatible LLM server — Qwen3.6-27B Fable-Fusion GGUF (Q8_0) with vision, bearer-token auth. Cloud-init **and** plain-bash forms. | 80 GB |
+| [`cloudinit/qwen-3.6/`](cloudinit/qwen-3.6/) | `llama.cpp` OpenAI-compatible LLM server — Qwen3.6-27B Fable-Fusion GGUF (Q8_0) with vision, bearer-token auth. Cloud-init **and** plain-bash forms. | 80 GB |
+| [`cloudinit/qwen-3.8/`](cloudinit/qwen-3.8/) | `llama.cpp` OpenAI-compatible LLM server — [Qwen3.8-27B Uncensored](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF) GGUF (Q8_0) with vision, bearer-token auth. Cloud-init **and** plain-bash forms. | 80 GB |
 | [`comfyui/A100/`](comfyui/A100/) | ComfyUI + **MiniMax H3** open-weights video model (text/image/reference → video, native audio). | A100 80 GB |
 
 ## Shared design
