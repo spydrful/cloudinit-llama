@@ -5,7 +5,7 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=65536
+CTX=262144                   # model native max; Q8_0 + vision on 80GB A100
 ################################################################
 
 REPO="DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF"

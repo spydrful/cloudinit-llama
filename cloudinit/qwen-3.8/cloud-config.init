@@ -17,8 +17,7 @@ write_files:
       API_KEY="CHANGE-ME"          # set your own token; if left as-is a random
                                    # one is generated -> /root/llama-api-key.txt
       PORT=8080
-      CTX=65536                    # model native max 262144; 80GB card fits it
-                                   # (Q8_0 ~29 GB + vision ~0.9 GB)
+      CTX=262144                   # model native max; Q8_0 + vision on 80GB A100
       ################################################################
 
       REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"

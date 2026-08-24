@@ -5,7 +5,7 @@ Boots an [OpenAI-compatible](https://github.com/ggml-org/llama.cpp/tree/master/t
 [JonathanColetti Qwen3.8-27B Uncensored](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF)
 GGUF (Q8_0, ~29 GB) with the vision projector so it accepts images too. Protected
 by a bearer token. Tuned for an 80 GB card (A100/H100); runs the whole model on
-GPU with a 64k context (native max 262144).
+GPU with the native **262144** context.
 
 Targets NVIDIA + Debian-based hosts (Ubuntu 22.04/24.04). Docker image is
 `ghcr.io/ggml-org/llama.cpp:server-cuda` (built on CUDA 12.8, runs on newer
@@ -55,7 +55,7 @@ Point any OpenAI-compatible client (e.g. Cline "OpenAI Compatible") at it:
 - Base URL: `http://<instance-ip>:8080/v1`
 - API key: your token
 - Model ID: `qwen3.8-27b-uncensored`
-- Context: 65536 (image input supported — vision projector is loaded)
+- Context: 262144 (image input supported — vision projector is loaded)
 
 ## Logs
 
