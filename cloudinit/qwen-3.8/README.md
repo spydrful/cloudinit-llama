@@ -20,13 +20,13 @@ the setup script on first boot.
 ### `bash_setup.sh` — plain bash
 For providers that **don't honour cloud-init** — some silently repurpose the
 "cloud-init" field as a bash runner (they `bash` your payload), so YAML fails.
-This form is a straight bash script: it writes `/root/setup.sh`, which you then
-run. Also the right choice when you already have a root shell:
+This form is a straight bash script: it writes `/root/setup.sh` and starts it
+in the background. Also the right choice when you already have a root shell
+(including `curl | bash`):
 
 ```bash
-sudo bash bash_setup.sh          # writes /root/setup.sh
-sudo nohup bash /root/setup.sh > ~/llama-setup.log 2>&1 &
-tail -f ~/llama-setup.log
+curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/main/cloudinit/qwen-3.8/bash_setup.sh | bash
+tail -f /root/llama-setup.log
 ```
 
 ## API token

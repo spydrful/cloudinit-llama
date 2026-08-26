@@ -1,4 +1,9 @@
-cat > /root/setup.sh <<'EOF'
+#!/usr/bin/env bash
+# Writes /root/setup.sh and starts it in the background.
+# Safe for:  curl -fsSL …/bash_setup.sh | bash
+set -euo pipefail
+
+cat > /root/setup.sh <<'SETUP_EOF'
 #!/usr/bin/env bash
 set -euxo pipefail
 
@@ -96,3 +101,10 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   "${EXTRA_ARGS[@]}"
 
 echo "DONE. API key: $API_KEY"
+SETUP_EOF
+
+chmod 755 /root/setup.sh
+echo "Wrote /root/setup.sh — starting in background (log: /root/llama-setup.log)"
+nohup bash /root/setup.sh >> /root/llama-setup.log 2>&1 &
+echo "pid $!"
+echo "Follow with:  tail -f /root/llama-setup.log"
