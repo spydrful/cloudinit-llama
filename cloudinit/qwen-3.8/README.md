@@ -24,6 +24,16 @@ This form is a straight bash script: it writes `/root/setup.sh` and starts it
 in the background. Also the right choice when you already have a root shell
 (including `curl | bash`):
 
+You do **not** need a host CUDA toolkit. The llama.cpp image ships CUDA. A stock Ubuntu 22.04/24.04 box only needs the **NVIDIA driver**, Docker, and the NVIDIA container toolkit.
+
+On a bare machine `curl | bash` installs the driver (`ubuntu-drivers autoinstall`, CUDA repo fallback), reboots **once**, then continues from a systemd unit. After SSH comes back:
+
+```bash
+tail -f /root/llama-setup.log
+```
+
+Wait for `DONE. API key:`. `nvidia-smi` should show the A100 before the model download starts.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/main/cloudinit/qwen-3.8/bash_setup.sh | bash
 tail -f /root/llama-setup.log

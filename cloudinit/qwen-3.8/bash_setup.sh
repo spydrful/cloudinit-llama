@@ -23,7 +23,9 @@ MODEL_SIZE=29047084448
 MMPROJ_FILE="Qwen3.8-27B-Uncensored-vision-f16.gguf"
 MMPROJ_SIZE=927606912
 
-if [ "$API_KEY" = "CHANGE-ME" ]; then
+if [ -f /root/llama-api-key.txt ]; then
+  API_KEY=$(cat /root/llama-api-key.txt)
+elif [ "$API_KEY" = "CHANGE-ME" ]; then
   API_KEY=$(openssl rand -hex 24)
 fi
 echo "$API_KEY" > /root/llama-api-key.txt
@@ -33,8 +35,55 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl ca-certificates gnupg openssl
 
+nvidia-smi >/dev/null 2>&1 || {
+  if [ -f /root/llama-nvidia-install.attempted ]; then
+    echo "nvidia-smi still failing after driver install + reboot" >&2
+    lspci -nn | grep -i nvidia || true
+    exit 1
+  fi
+  touch /root/llama-nvidia-install.attempted
+  apt-get install -y build-essential dkms "linux-headers-$(uname -r)" ubuntu-drivers-common
+  cat >/etc/modprobe.d/blacklist-nouveau.conf <<'NOUVEAU'
+blacklist nouveau
+options nouveau modeset=0
+NOUVEAU
+  update-initramfs -u || true
+  ubuntu-drivers autoinstall || {
+    . /etc/os-release
+    case "${VERSION_ID:-22.04}" in
+      24.04) CUDA_DISTRO=ubuntu2404 ;;
+      *)     CUDA_DISTRO=ubuntu2204 ;;
+    esac
+    curl -fsSL -o /tmp/cuda-keyring.deb \
+      "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb"
+    dpkg -i /tmp/cuda-keyring.deb
+    apt-get update
+    apt-get install -y cuda-drivers
+  }
+  cat >/etc/systemd/system/llama-setup-continue.service <<UNIT
+[Unit]
+Description=Continue llama.cpp setup after NVIDIA driver install
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$(readlink -f "$0")
+TimeoutStartSec=infinity
+StandardOutput=append:/root/llama-setup.log
+StandardError=append:/root/llama-setup.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable llama-setup-continue.service
+  echo "NVIDIA driver installed; rebooting. Setup continues from /root/llama-setup.log"
+  reboot
+}
 nvidia-smi
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+systemctl enable --now docker
 
 if ! command -v nvidia-ctk >/dev/null; then
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -100,6 +149,10 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --threads "$THREADS" --threads-http "$HTTP_THREADS" \
   --image-min-tokens 1024 --reasoning-preserve \
   "${YARN_ARGS[@]}"
+
+systemctl disable llama-setup-continue.service 2>/dev/null || true
+rm -f /etc/systemd/system/llama-setup-continue.service
+systemctl daemon-reload 2>/dev/null || true
 
 echo "DONE. API key: $API_KEY"
 SETUP_EOF
