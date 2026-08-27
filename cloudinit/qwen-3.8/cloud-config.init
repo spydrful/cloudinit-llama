@@ -5,6 +5,9 @@ packages:
   - ca-certificates
   - gnupg
   - openssl
+  - build-essential
+  - dkms
+  - ubuntu-drivers-common
 
 write_files:
   - path: /opt/llama/setup.sh

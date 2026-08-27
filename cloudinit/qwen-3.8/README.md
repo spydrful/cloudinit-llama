@@ -7,9 +7,9 @@ GGUF (Q8_0, ~29 GB) with the vision projector so it accepts images too. Protecte
 by a bearer token. Tuned for an 80 GB card (A100/H100); runs the whole model on
 GPU with **524288** context (2× YaRN). Tuned for a typical rental: **1× A100 80GB, 28 vCPU, 120 GB RAM**.
 
-Targets NVIDIA + Debian-based hosts (Ubuntu 22.04/24.04). Docker image is
-`ghcr.io/ggml-org/llama.cpp:server-cuda` (built on CUDA 12.8, runs on newer
-drivers via forward compatibility).
+Targets NVIDIA hosts on **Ubuntu 22.04/24.04** and **AlmaLinux / Rocky / RHEL 8–10**. Docker image is
+`ghcr.io/ggml-org/llama.cpp:server-cuda` (CUDA 12.8 in the image — no host CUDA toolkit).
+The bash installer uses `apt` or `dnf` from `/etc/os-release`.
 
 ## Two deploy forms — pick one
 
@@ -24,20 +24,23 @@ This form is a straight bash script: it writes `/root/setup.sh` and starts it
 in the background. Also the right choice when you already have a root shell
 (including `curl | bash`):
 
-You do **not** need a host CUDA toolkit. The llama.cpp image ships CUDA. A stock Ubuntu 22.04/24.04 box only needs the **NVIDIA driver**, Docker, and the NVIDIA container toolkit.
+You do **not** need a host CUDA toolkit. The llama.cpp image ships CUDA. A stock Ubuntu or AlmaLinux/Rocky/RHEL box only needs the **NVIDIA driver**, Docker, and the NVIDIA container toolkit.
 
-On a bare machine `curl | bash` installs the driver (`ubuntu-drivers autoinstall`, CUDA repo fallback), reboots **once**, then continues from a systemd unit. After SSH comes back:
+On a bare machine `curl | bash` installs the driver (Ubuntu: `ubuntu-drivers autoinstall`; Alma/RHEL: CUDA `rhelN` repo + `cuda-drivers`), reboots **once**, then continues from a systemd unit. After SSH comes back:
 
 ```bash
 tail -f /root/llama-setup.log
 ```
 
-Wait for `DONE. API key:`. `nvidia-smi` should show the A100 before the model download starts.
+Wait for `DONE. API key:`. `nvidia-smi` should show the GPU before the model download starts.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/main/cloudinit/qwen-3.8/bash_setup.sh | bash
+# as root — Ubuntu 22.04/24.04 or AlmaLinux / Rocky / RHEL 8–10
+curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-yarn-1m-3063/cloudinit/qwen-3.8/bash_setup.sh | bash
 tail -f /root/llama-setup.log
 ```
+
+Alma/RHEL notes: the script opens TCP 8080 in firewalld if it is running, and sets `container_use_devices` when SELinux is not Disabled. Secure Boot boxes need a signed NVIDIA module (typical GPU rentals do not enable Secure Boot). `cloud-config.init` is still Ubuntu/`apt` only — use this bash form on Alma.
 
 ## API token
 
