@@ -5,6 +5,9 @@ packages:
   - ca-certificates
   - gnupg
   - openssl
+  - build-essential
+  - dkms
+  - ubuntu-drivers-common
 
 write_files:
   - path: /opt/llama/setup.sh
@@ -17,7 +20,8 @@ write_files:
       API_KEY="CHANGE-ME"          # set your own token; if left as-is a random
                                    # one is generated -> /root/llama-api-key.txt
       PORT=8080
-      CTX=262144                   # model native max; Q8_0 + vision on 80GB A100
+      CTX=262144                   # used when YARN=0 (native, no RoPE scaling)
+      YARN=1                       # 1 = 2x YaRN to 524288 (fits 1x A100 80GB + 120GB host RAM)
       ################################################################
 
       REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -29,13 +33,61 @@ write_files:
       MMPROJ_FILE="Qwen3.8-27B-Uncensored-vision-f16.gguf"
       MMPROJ_SIZE=927606912
 
-      if [ "$API_KEY" = "CHANGE-ME" ]; then
+      if [ -f /root/llama-api-key.txt ]; then
+        API_KEY=$(cat /root/llama-api-key.txt)
+      elif [ "$API_KEY" = "CHANGE-ME" ]; then
         API_KEY=$(openssl rand -hex 24)
       fi
       echo "$API_KEY" > /root/llama-api-key.txt
       chmod 600 /root/llama-api-key.txt
 
+      nvidia-smi >/dev/null 2>&1 || {
+        if [ -f /root/llama-nvidia-install.attempted ]; then
+          echo "nvidia-smi still failing after driver install + reboot" >&2
+          lspci -nn | grep -i nvidia || true
+          exit 1
+        fi
+        touch /root/llama-nvidia-install.attempted
+        apt-get install -y build-essential dkms "linux-headers-$(uname -r)" ubuntu-drivers-common
+        printf '%s\n' 'blacklist nouveau' 'options nouveau modeset=0' \
+          > /etc/modprobe.d/blacklist-nouveau.conf
+        update-initramfs -u || true
+        ubuntu-drivers autoinstall || {
+          . /etc/os-release
+          case "${VERSION_ID:-22.04}" in
+            24.04) CUDA_DISTRO=ubuntu2404 ;;
+            *)     CUDA_DISTRO=ubuntu2204 ;;
+          esac
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb"
+          dpkg -i /tmp/cuda-keyring.deb
+          apt-get update
+          apt-get install -y cuda-drivers
+        }
+        printf '%s\n' \
+          '[Unit]' \
+          'Description=Continue llama.cpp setup after NVIDIA driver install' \
+          'After=network-online.target' \
+          'Wants=network-online.target' \
+          '' \
+          '[Service]' \
+          'Type=oneshot' \
+          'ExecStart=/bin/bash -c '"'"'exec >>/var/log/llama-setup.log 2>&1; exec /bin/bash /opt/llama/setup.sh'"'" \
+          'TimeoutStartSec=infinity' \
+          '' \
+          '[Install]' \
+          'WantedBy=multi-user.target' \
+          > /etc/systemd/system/llama-setup-continue.service
+        systemctl daemon-reload
+        systemctl enable llama-setup-continue.service
+        echo "NVIDIA driver installed; rebooting. Setup continues from /var/log/llama-setup.log"
+        sync
+        systemctl reboot || reboot
+        exit 0
+      }
       nvidia-smi
+      command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+      systemctl enable --now docker
 
       # NVIDIA container toolkit (skipped if image already has it)
       if ! command -v nvidia-ctk >/dev/null; then
@@ -70,9 +122,24 @@ write_files:
       dl "$MODEL_FILE" "$MODEL_SIZE"
       dl "$MMPROJ_FILE" "$MMPROJ_SIZE"
 
+      # Typical box: 1x A100 80GB, 28 vCPU, 120GB RAM.
+      NPROC=$(nproc)
+      THREADS=$(( NPROC > 8 ? 8 : NPROC ))
+      HTTP_THREADS=$(( NPROC > 4 ? 4 : NPROC ))
+
+      YARN_ARGS=()
+      if [ "$YARN" = "1" ]; then
+        CTX=524288
+        YARN_ARGS=(
+          --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
+          --override-kv qwen35.context_length=int:524288
+        )
+      fi
+
       # Serve
       docker rm -f llama 2>/dev/null || true
       docker run -d --name llama --restart unless-stopped --gpus all \
+        --shm-size 16g \
         -p "${PORT}:8080" -v /models:/models \
         ghcr.io/ggml-org/llama.cpp:server-cuda \
         -m "/models/${MODEL_FILE}" \
@@ -80,7 +147,17 @@ write_files:
         --host 0.0.0.0 --port 8080 \
         --api-key "$API_KEY" \
         -ngl 999 -c "$CTX" --jinja \
-        --alias qwen3.8-27b-uncensored
+        --alias qwen3.8-27b-uncensored \
+        --flash-attn on -np 1 \
+        --cache-ram -1 \
+        -b 2048 -ub 2048 \
+        --threads "$THREADS" --threads-http "$HTTP_THREADS" \
+        --image-min-tokens 1024 --reasoning-preserve \
+        "${YARN_ARGS[@]}"
+
+      systemctl disable llama-setup-continue.service 2>/dev/null || true
+      rm -f /etc/systemd/system/llama-setup-continue.service
+      systemctl daemon-reload 2>/dev/null || true
 
       echo "DONE. API key: $API_KEY"
 
