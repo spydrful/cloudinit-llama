@@ -67,10 +67,12 @@ Long OpenCode sessions were re-prefilling from scratch because llama.cpp opened 
 
 - **`-np 1`** — one slot, so the next turn reuses this chat’s KV
 - **`--cache-ram -1`** — no 8 GB cap on serialized prompt state (~10 GB at 150k tokens)
-- **`--cache-reuse 256`** — prefix match / KV shift when the prompt is not identical
 - **`--flash-attn on -b 2048 -ub 2048`** — faster prefill on 80GB
 - **`--threads 8 --threads-http 4`** — GPU does the model; leave the rest of the 28 vCPUs to the OS
 - **`--shm-size 16g`** on the container
+- **`--image-min-tokens 1024 --reasoning-preserve`** — Qwen-VL floor + keep thinking traces in history
+
+`--cache-reuse` is a no-op with the vision projector loaded; `--defrag-thold` is deprecated. Both are omitted.
 
 Already-running box (no re-download; Cline/OpenCode context **524288**):
 
@@ -88,10 +90,10 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144 \
   --override-kv qwen35.context_length=int:524288 \
   --flash-attn on -np 1 \
-  --cache-ram -1 --cache-reuse 256 \
+  --cache-ram -1 \
   -b 2048 -ub 2048 \
   --threads 8 --threads-http 4 \
-  --defrag-thold 0.1
+  --image-min-tokens 1024 --reasoning-preserve
 ```
 
 ## Logs

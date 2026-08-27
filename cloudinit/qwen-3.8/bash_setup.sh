@@ -95,10 +95,10 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   -ngl 999 -c "$CTX" --jinja \
   --alias qwen3.8-27b-uncensored \
   --flash-attn on -np 1 \
-  --cache-ram -1 --cache-reuse 256 \
+  --cache-ram -1 \
   -b 2048 -ub 2048 \
   --threads "$THREADS" --threads-http "$HTTP_THREADS" \
-  --defrag-thold 0.1 \
+  --image-min-tokens 1024 --reasoning-preserve \
   "${YARN_ARGS[@]}"
 
 echo "DONE. API key: $API_KEY"
