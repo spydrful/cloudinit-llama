@@ -72,10 +72,8 @@ write_files:
           '' \
           '[Service]' \
           'Type=oneshot' \
-          "ExecStart=$(readlink -f "$0")" \
+          'ExecStart=/bin/bash -c '"'"'exec >>/var/log/llama-setup.log 2>&1; exec /bin/bash /opt/llama/setup.sh'"'" \
           'TimeoutStartSec=infinity' \
-          'StandardOutput=append:/var/log/llama-setup.log' \
-          'StandardError=append:/var/log/llama-setup.log' \
           '' \
           '[Install]' \
           'WantedBy=multi-user.target' \
@@ -83,7 +81,9 @@ write_files:
         systemctl daemon-reload
         systemctl enable llama-setup-continue.service
         echo "NVIDIA driver installed; rebooting. Setup continues from /var/log/llama-setup.log"
-        reboot
+        sync
+        systemctl reboot || reboot
+        exit 0
       }
       nvidia-smi
       command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh

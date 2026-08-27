@@ -20,9 +20,9 @@ the setup script on first boot.
 ### `bash_setup.sh` — plain bash
 For providers that **don't honour cloud-init** — some silently repurpose the
 "cloud-init" field as a bash runner (they `bash` your payload), so YAML fails.
-This form is a straight bash script: it writes `/root/setup.sh` and starts it
-in the background. Also the right choice when you already have a root shell
-(including `curl | bash`):
+This form is a straight bash script: it writes `/usr/local/sbin/llama-setup.sh`
+(symlink `/root/setup.sh`) and starts it in the background. Also the right
+choice when you already have a root shell (including `curl | bash`):
 
 You do **not** need a host CUDA toolkit. The llama.cpp image ships CUDA. A stock Ubuntu or AlmaLinux/Rocky/RHEL box only needs the **NVIDIA driver**, Docker, and the NVIDIA container toolkit.
 
@@ -40,7 +40,15 @@ curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwe
 tail -f /root/llama-setup.log
 ```
 
-Alma/RHEL notes: the script opens TCP 8080 in firewalld if it is running, and sets `container_use_devices` when SELinux is not Disabled. Secure Boot boxes need a signed NVIDIA module (typical GPU rentals do not enable Secure Boot). `cloud-config.init` is still Ubuntu/`apt` only — use this bash form on Alma.
+Alma/RHEL notes: the script opens TCP 8080 in firewalld if it is running, and sets `container_use_devices` when SELinux is not Disabled. The continue-after-reboot unit runs `/usr/local/sbin/llama-setup.sh` via `/bin/bash` because systemd+SELinux will not execute a script under `/root`. Secure Boot boxes need a signed NVIDIA module (typical GPU rentals do not enable Secure Boot). `cloud-config.init` is still Ubuntu/`apt` only — use this bash form on Alma.
+
+If the log stops at `rebooting` and nothing continues after SSH comes back (older script):
+
+```bash
+nvidia-smi   # must work; if not, journalctl -u llama-setup-continue -b
+curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-yarn-1m-3063/cloudinit/qwen-3.8/bash_setup.sh | bash
+tail -f /root/llama-setup.log
+```
 
 ## API token
 

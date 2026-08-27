@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Writes /root/setup.sh and starts it in the background.
+# Writes the setup script and starts it in the background.
 # Safe for:  curl -fsSL …/bash_setup.sh | bash
 # Ubuntu 22.04/24.04 and AlmaLinux/Rocky/RHEL 8–10.
+#
+# Install path is /usr/local/sbin (not /root): systemd + SELinux on Alma/RHEL
+# cannot execute scripts labeled admin_home_t, so a continue unit pointing at
+# /root/setup.sh dies after the driver reboot with nothing in the log.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "Run as root (this writes /root/setup.sh)." >&2
+  echo "Run as root." >&2
   exit 1
 fi
 
-cat > /root/setup.sh <<'SETUP_EOF'
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/llama-setup.sh <<'SETUP_EOF'
 #!/usr/bin/env bash
 set -euxo pipefail
 
@@ -52,10 +57,29 @@ fi
 echo "$API_KEY" > /root/llama-api-key.txt
 chmod 600 /root/llama-api-key.txt
 
-nvidia-smi >/dev/null 2>&1 || {
+wait_for_nvidia() {
+  modprobe nvidia 2>/dev/null || true
+  modprobe nvidia_uvm 2>/dev/null || true
+  local i
+  for i in $(seq 1 90); do
+    nvidia-smi >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+nvidia_ok=0
+nvidia-smi >/dev/null 2>&1 && nvidia_ok=1
+# After the driver reboot the kmod can take a few seconds.
+if [ "$nvidia_ok" -eq 0 ] && [ -f /root/llama-nvidia-install.attempted ]; then
+  wait_for_nvidia && nvidia_ok=1
+fi
+
+if [ "$nvidia_ok" -eq 0 ]; then
   if [ -f /root/llama-nvidia-install.attempted ]; then
     echo "nvidia-smi still failing after driver install + reboot" >&2
     lspci -nn | grep -i nvidia || true
+    journalctl -u llama-setup-continue --no-pager -n 50 || true
     exit 1
   fi
   touch /root/llama-nvidia-install.attempted
@@ -92,7 +116,11 @@ nvidia-smi >/dev/null 2>&1 || {
       || dnf -y module install nvidia-driver:open-dkms
     dracut -f || true
   fi
-  cat >/etc/systemd/system/llama-setup-continue.service <<UNIT
+  install -m 755 "$0" /usr/local/sbin/llama-setup.sh
+  restorecon -v /usr/local/sbin/llama-setup.sh 2>/dev/null \
+    || chcon -t bin_t /usr/local/sbin/llama-setup.sh 2>/dev/null || true
+  ln -sfn /usr/local/sbin/llama-setup.sh /root/setup.sh
+  cat >/etc/systemd/system/llama-setup-continue.service <<'UNIT'
 [Unit]
 Description=Continue llama.cpp setup after NVIDIA driver install
 After=network-online.target
@@ -100,10 +128,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$(readlink -f "$0")
+ExecStart=/bin/bash -c 'exec >>/root/llama-setup.log 2>&1; exec /bin/bash /usr/local/sbin/llama-setup.sh'
 TimeoutStartSec=infinity
-StandardOutput=append:/root/llama-setup.log
-StandardError=append:/root/llama-setup.log
+SyslogIdentifier=llama-setup
 
 [Install]
 WantedBy=multi-user.target
@@ -111,8 +138,10 @@ UNIT
   systemctl daemon-reload
   systemctl enable llama-setup-continue.service
   echo "NVIDIA driver installed; rebooting. Setup continues from /root/llama-setup.log"
-  reboot
-}
+  sync
+  systemctl reboot || reboot
+  exit 0
+fi
 nvidia-smi
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 systemctl enable --now docker
@@ -203,8 +232,11 @@ systemctl daemon-reload 2>/dev/null || true
 echo "DONE. API key: $API_KEY"
 SETUP_EOF
 
-chmod 755 /root/setup.sh
-echo "Wrote /root/setup.sh — starting in background (log: /root/llama-setup.log)"
-nohup bash /root/setup.sh >> /root/llama-setup.log 2>&1 &
+chmod 755 /usr/local/sbin/llama-setup.sh
+ln -sfn /usr/local/sbin/llama-setup.sh /root/setup.sh
+restorecon -v /usr/local/sbin/llama-setup.sh 2>/dev/null \
+  || chcon -t bin_t /usr/local/sbin/llama-setup.sh 2>/dev/null || true
+echo "Wrote /usr/local/sbin/llama-setup.sh — starting in background (log: /root/llama-setup.log)"
+nohup bash /usr/local/sbin/llama-setup.sh >> /root/llama-setup.log 2>&1 &
 echo "pid $!"
 echo "Follow with:  tail -f /root/llama-setup.log"
