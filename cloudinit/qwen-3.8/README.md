@@ -5,7 +5,7 @@ Boots an [OpenAI-compatible](https://github.com/ggml-org/llama.cpp/tree/master/t
 [JonathanColetti Qwen3.8-27B Uncensored](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF)
 GGUF (Q8_0, ~29 GB) with the vision projector so it accepts images too. Protected
 by a bearer token. Tuned for an 80 GB card (A100/H100); runs the whole model on
-GPU with **524288** context on one 80GB card (2× YaRN) or **1048576** on two (4× YaRN).
+GPU with **524288** context (2× YaRN). Tuned for a typical rental: **1× A100 80GB, 28 vCPU, 120 GB RAM**.
 
 Targets NVIDIA + Debian-based hosts (Ubuntu 22.04/24.04). Docker image is
 `ghcr.io/ggml-org/llama.cpp:server-cuda` (built on CUDA 12.8, runs on newer
@@ -55,31 +55,30 @@ Point any OpenAI-compatible client (e.g. Cline "OpenAI Compatible") at it:
 - Base URL: `http://<instance-ip>:8080/v1`
 - API key: your token
 - Model ID: `qwen3.8-27b-uncensored`
-- Context: **524288** on 1×80GB, **1048576** on 2×80GB (`YARN=1`). Native 262144 if `YARN=0`.
+- Context: **524288** with 2× YaRN (`YARN=1`). Native 262144 if `YARN=0`.
 
 ## YaRN / longer context
 
-Qwen3.8 natively trains at **262,144**. Unsloth/Qwen document YaRN up to **1,048,576** (4×). Same GGUF; only RoPE scaling and KV size change.
+Default is **`YARN=1` → 524288** (2× YaRN, f16 KV ~32 GB, ~62 GB VRAM with Q8_0 + vision). That is the largest comfortable window on one A100 80GB. Native 262144 if `YARN=0`. 1M needs a second 80GB card.
 
-llama.cpp pre-allocates KV for `-c`. Weights stay ~29 GB (Q8_0) + ~0.9 GB vision. Only 16 of 64 layers are full attention (4 KV heads × dim 256), so KV is ~64 KiB/token at f16:
+## Performance flags (28 vCPU / 120 GB RAM / 1× A100 80GB)
 
-| Context | YaRN | KV (f16) | Q8_0 + vision + KV | 1× A100 80GB | 2× A100 80GB (160 GB) |
-|---|---|---:|---:|---|---|
-| 262,144 | off | ~16 GB | ~46 GB | fits | fits |
-| **524,288** | **2×** | **~32 GB** | **~62 GB** | **fits, 1-GPU default** | fits |
-| 786,432 | 3× | ~48 GB | ~78 GB | too tight | fits |
-| **1,048,576** | **4×** | **~64 GB** | **~94 GB** | f16 **OOM** | **fits, 2-GPU default** |
+Long OpenCode sessions were re-prefilling from scratch because llama.cpp opened several slots (LRU) and skipped prompt-cache saves over the default **8 GB** `--cache-ram`. This box has 120 GB host RAM, so the startup now:
 
-The second GPU is for the cache, not the weights. Q8_0 is only ~30 GB; 1M f16 KV is ~64 GB, so one 80GB card cannot hold both. With `--tensor-split 1,1`, each GPU holds ~15 GB weights + ~32 GB KV.
+- **`-np 1`** — one slot, so the next turn reuses this chat’s KV
+- **`--cache-ram -1`** — no 8 GB cap on serialized prompt state (~10 GB at 150k tokens)
+- **`--cache-reuse 256`** — prefix match / KV shift when the prompt is not identical
+- **`--flash-attn on -b 2048 -ub 2048`** — faster prefill on 80GB
+- **`--threads 8 --threads-http 4`** — GPU does the model; leave the rest of the 28 vCPUs to the OS
+- **`--shm-size 16g`** on the container
 
-`YARN=1` picks this from `nvidia-smi` at boot: **512k on one GPU, 1M on two**. Set `YARN=0` for native 262k. Going past 1M is outside Qwen’s documented YaRN range.
-
-Already-running **1 GPU** (Cline context **524288**):
+Already-running box (no re-download; Cline/OpenCode context **524288**):
 
 ```bash
 API_KEY=$(sudo cat /root/llama-api-key.txt)
 docker rm -f llama
 docker run -d --name llama --restart unless-stopped --gpus all \
+  --shm-size 16g \
   -p 8080:8080 -v /models:/models \
   ghcr.io/ggml-org/llama.cpp:server-cuda \
   -m /models/Qwen3.8-27B-Uncensored-Q8_0.gguf \
@@ -87,28 +86,13 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --host 0.0.0.0 --port 8080 --api-key "$API_KEY" \
   -ngl 999 -c 524288 --jinja --alias qwen3.8-27b-uncensored \
   --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144 \
-  --flash-attn on \
-  --override-kv qwen35.context_length=int:524288
+  --override-kv qwen35.context_length=int:524288 \
+  --flash-attn on -np 1 \
+  --cache-ram -1 --cache-reuse 256 \
+  -b 2048 -ub 2048 \
+  --threads 8 --threads-http 4 \
+  --defrag-thold 0.1
 ```
-
-Already-running **2 GPU** (Cline context **1048576**):
-
-```bash
-API_KEY=$(sudo cat /root/llama-api-key.txt)
-docker rm -f llama
-docker run -d --name llama --restart unless-stopped --gpus all \
-  -p 8080:8080 -v /models:/models \
-  ghcr.io/ggml-org/llama.cpp:server-cuda \
-  -m /models/Qwen3.8-27B-Uncensored-Q8_0.gguf \
-  --mmproj /models/Qwen3.8-27B-Uncensored-vision-f16.gguf \
-  --host 0.0.0.0 --port 8080 --api-key "$API_KEY" \
-  -ngl 999 -c 1048576 --jinja --alias qwen3.8-27b-uncensored \
-  --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144 \
-  --flash-attn on --tensor-split 1,1 \
-  --override-kv qwen35.context_length=int:1048576
-```
-
-Two cards can also run **two separate 512k servers** instead of one 1M server if you care more about concurrent jobs than a million-token window.
 
 ## Logs
 

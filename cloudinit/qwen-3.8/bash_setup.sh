@@ -11,7 +11,7 @@ set -euxo pipefail
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
 CTX=262144                   # used when YARN=0 (native, no RoPE scaling)
-YARN=1                       # 1 = YaRN: 524288 on 1x80GB, 1048576 on 2x80GB (f16 KV)
+YARN=1                       # 1 = 2x YaRN to 524288 (fits 1x A100 80GB + 120GB host RAM)
 ################################################################
 
 REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
@@ -65,31 +65,27 @@ dl() { # filename expected_bytes
 dl "$MODEL_FILE" "$MODEL_SIZE"
 dl "$MMPROJ_FILE" "$MMPROJ_SIZE"
 
-GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
-EXTRA_ARGS=()
+# Typical box: 1x A100 80GB, 28 vCPU, 120GB RAM.
+# -np 1 keeps OpenCode on one slot so KV prefix is reused.
+# --cache-ram -1: default 8GB skip-saves ~10GB long-session states (host RAM, not VRAM).
+# -ub 2048: faster prefill on 80GB; flash-attn keeps the compute buffer in check.
+NPROC=$(nproc)
+THREADS=$(( NPROC > 8 ? 8 : NPROC ))
+HTTP_THREADS=$(( NPROC > 4 ? 4 : NPROC ))
+
+YARN_ARGS=()
 if [ "$YARN" = "1" ]; then
+  CTX=524288
   # override-kv: llama-server otherwise caps slots at n_ctx_train (262144).
-  # 1x80GB: 2x YaRN, f16 KV ~32 GB, ~62 GB total.
-  # 2x80GB: 4x YaRN / 1M, f16 KV ~64 GB split across GPUs (~94 GB total < 160).
-  if [ "$GPU_COUNT" -ge 2 ]; then
-    CTX=1048576
-    EXTRA_ARGS=(
-      --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
-      --flash-attn on --tensor-split 1,1
-      --override-kv qwen35.context_length=int:1048576
-    )
-  else
-    CTX=524288
-    EXTRA_ARGS=(
-      --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
-      --flash-attn on
-      --override-kv qwen35.context_length=int:524288
-    )
-  fi
+  YARN_ARGS=(
+    --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
+    --override-kv qwen35.context_length=int:524288
+  )
 fi
 
 docker rm -f llama 2>/dev/null || true
 docker run -d --name llama --restart unless-stopped --gpus all \
+  --shm-size 16g \
   -p "${PORT}:8080" -v /models:/models \
   ghcr.io/ggml-org/llama.cpp:server-cuda \
   -m "/models/${MODEL_FILE}" \
@@ -98,7 +94,12 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --api-key "$API_KEY" \
   -ngl 999 -c "$CTX" --jinja \
   --alias qwen3.8-27b-uncensored \
-  "${EXTRA_ARGS[@]}"
+  --flash-attn on -np 1 \
+  --cache-ram -1 --cache-reuse 256 \
+  -b 2048 -ub 2048 \
+  --threads "$THREADS" --threads-http "$HTTP_THREADS" \
+  --defrag-thold 0.1 \
+  "${YARN_ARGS[@]}"
 
 echo "DONE. API key: $API_KEY"
 SETUP_EOF
