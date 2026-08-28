@@ -58,17 +58,35 @@ The installer pins `per_layer_token_embd.weight` to CPU when total VRAM is under
 (`BUILD_LLAMA=1`). Set `BUILD_LLAMA=0` to pull GHCR instead once you know that
 tag is new enough. Host CUDA toolkit is still not required.
 
+## Hugging Face token (required)
+
+This repo is **gated**. Anonymous `curl` gets **HTTP 401**. Before install:
+
+1. Open [the model page](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF) while logged in and **accept the access terms**.
+2. Create a **Read** token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+3. On the GPU box:
+
+```bash
+printf '%s\n' 'hf_YOUR_TOKEN' > /root/hf-token.txt
+chmod 600 /root/hf-token.txt
+```
+
+A token without accepting the terms still 401s. If a previous run left a tiny junk file:
+
+```bash
+rm -f /models/Qwen3.8-Flash-Next-Uncensored-Q5_K_M-*.gguf
+bash /usr/local/sbin/llama-setup.sh >> /root/llama-setup.log 2>&1 &
+tail -f /root/llama-setup.log
+```
+
 ## Deploy (Spheron: use bash)
 
 ```bash
 # as root — Ubuntu 22.04/24.04 or AlmaLinux / Rocky / RHEL 8–10
-# 2× A100 80GB, ~200 GB free disk
+# 2× A100 80GB, ~200 GB free disk, /root/hf-token.txt already written
 curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-flash-next-3063/cloudinit/qwen-3.8-flash-next/bash_setup.sh | bash
 tail -f /root/llama-setup.log
 ```
-
-If the Hugging Face repo asks you to accept a license, put a token in
-`/root/hf-token.txt` (or `HF_TOKEN` at the top of the script) and re-run.
 
 Wait for `DONE. API key:`. First boot may install an NVIDIA driver and reboot
 once; SSH back in and tail the same log. Compile + 125 GiB download takes a

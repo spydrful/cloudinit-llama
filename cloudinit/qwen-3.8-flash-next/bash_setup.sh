@@ -13,6 +13,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Gated HF repo: persist a token from the environment so curl | bash works.
+if [ -n "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}" ]; then
+  umask 077
+  printf '%s\n' "${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}" > /root/hf-token.txt
+  chmod 600 /root/hf-token.txt
+fi
+
 mkdir -p /usr/local/sbin
 cat > /usr/local/sbin/llama-setup.sh <<'SETUP_EOF'
 #!/usr/bin/env bash
@@ -25,7 +32,7 @@ CTX=65536                    # native max is 262144; raise if VRAM allows
 QUANT=Q5_K_M                 # Q5_K_M (highest) or Q5_K_S (a bit smaller)
 PLE_CPU=""                   # 1 = pin n-gram table to host RAM; auto if VRAM < ~150 GiB
 BUILD_LLAMA=1                # 1 = build llama-server from llama.cpp master (qwen4exp)
-HF_TOKEN=""                  # optional; or put a token in /root/hf-token.txt
+HF_TOKEN=""                  # required (gated repo). Or /root/hf-token.txt
 ################################################################
 
 REPO="orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"
@@ -56,8 +63,27 @@ fi
 echo "$API_KEY" > /root/llama-api-key.txt
 chmod 600 /root/llama-api-key.txt
 
-if [ -z "$HF_TOKEN" ] && [ -f /root/hf-token.txt ]; then
-  HF_TOKEN=$(tr -d '\n' < /root/hf-token.txt)
+if [ -z "$HF_TOKEN" ]; then
+  for tokfile in /root/hf-token.txt /root/.cache/huggingface/token /root/.huggingface/token; do
+    if [ -f "$tokfile" ]; then
+      HF_TOKEN=$(tr -d '[:space:]' < "$tokfile")
+      [ -n "$HF_TOKEN" ] && break
+    fi
+  done
+fi
+if [ -z "$HF_TOKEN" ]; then
+  cat >&2 <<'ERR'
+This GGUF repo is gated (HTTP 401 without a token).
+
+1. Log in at https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF
+   and accept the access terms.
+2. Create a READ token: https://huggingface.co/settings/tokens
+3. On this box:
+     printf '%s\n' 'hf_YOUR_TOKEN' > /root/hf-token.txt
+     chmod 600 /root/hf-token.txt
+4. Re-run:  bash /usr/local/sbin/llama-setup.sh
+ERR
+  exit 1
 fi
 
 wait_for_nvidia() {
@@ -217,14 +243,32 @@ mkdir -p /models
 dl() { # filename expected_bytes
   local f="/models/$1"
   if [ -f "$f" ] && [ "$(stat -c%s "$f")" -eq "$2" ]; then return 0; fi
-  local auth=()
-  if [ -n "${HF_TOKEN:-}" ]; then
-    auth=(-H "Authorization: Bearer ${HF_TOKEN}")
+  if [ -f "$f" ]; then
+    echo "incomplete $f ($(stat -c%s "$f") bytes) — deleting and restarting"
+    rm -f "$f"
   fi
-  curl -fL --retry 10 --retry-delay 5 -C - "${auth[@]}" -o "$f" \
-    "https://huggingface.co/${REPO}/resolve/main/$1"
+  curl -fL --retry 10 --retry-delay 5 --retry-connrefused -C - \
+    -H "Authorization: Bearer ${HF_TOKEN}" \
+    -o "$f" \
+    "https://huggingface.co/${REPO}/resolve/main/$1?download=true"
   [ "$(stat -c%s "$f")" -eq "$2" ] || { echo "SIZE MISMATCH: $f"; exit 1; }
 }
+
+hf_probe="${PARTS[0]%%:*}"
+echo "Probing Hugging Face auth for ${hf_probe}"
+hf_code=$(curl -sS -o /tmp/hf-probe.body -w "%{http_code}" -L --max-time 30 \
+  -H "Authorization: Bearer ${HF_TOKEN}" \
+  "https://huggingface.co/${REPO}/resolve/main/${hf_probe}?download=true" \
+  -r 0-0 || true)
+if [ "$hf_code" != "200" ] && [ "$hf_code" != "206" ]; then
+  echo "Hugging Face refused the download (HTTP ${hf_code})." >&2
+  echo "Accept the model terms while logged in, then use a READ token." >&2
+  echo "  https://huggingface.co/${REPO}" >&2
+  echo "  printf '%s\\n' 'hf_YOUR_TOKEN' > /root/hf-token.txt" >&2
+  sed -n '1,20p' /tmp/hf-probe.body >&2 || true
+  exit 1
+fi
+rm -f /tmp/hf-probe.body
 for spec in "${PARTS[@]}"; do
   dl "${spec%%:*}" "${spec##*:}"
 done
