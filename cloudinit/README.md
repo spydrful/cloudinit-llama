@@ -7,3 +7,4 @@ model (cloud-init **and** plain-bash forms). Pick one:
 |---|---|
 | [`qwen-3.6/`](qwen-3.6/) | Qwen3.6-27B Fable-Fusion GGUF (Q8_0) with vision |
 | [`qwen-3.8/`](qwen-3.8/) | Qwen3.8-27B Uncensored GGUF (Q8_0) with vision |
+| [`glm-5.3-flash/`](glm-5.3-flash/) | GLM-5.3-Flash Unsloth UD-IQ3_XXS (~120 GB; **2× 80 GB**) |
