@@ -6,8 +6,9 @@
 # Qwen3.8-Flash-Next Uncensored GGUF (qwen4exp). Needs llama.cpp from 2026-08-27+
 # (PR #27742). Default quant is Q5_K_M (~125 GiB). There is no Q6 — the PLE
 # tensor would exceed HF's 50 GB file cap. Target box: 4× A100 80GB.
-# Native window is 262144; default is YaRN ×2 to 524288. 2×80GB keeps native 262k
-# (hybrid KV is ~6 GiB at 262k — only 12 of 48 layers grow a cache).
+# Native window is 262144; default is YaRN ×4 to 1048576 (Qwen's 1M max).
+# 2×80GB keeps native 262k (hybrid KV is ~6 GiB at 262k — only 12 of 48 layers
+# grow a cache; ~24 GiB at 1M, which is the 4× box).
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -30,7 +31,7 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=524288                   # YaRN ×2. Native 262144. 1048576 = 1M (factor 4)
+CTX=1048576                  # YaRN ×4 = 1M (Qwen max). Native 262144. 524288 = ×2
 YARN=1                       # 0 = native window only (no RoPE scaling)
 CTX_FORCE=0                  # 1 = keep CTX/YARN even on 2×80GB
 QUANT=Q5_K_M                 # Q5_K_M (highest) or Q5_K_S (a bit smaller)
@@ -415,18 +416,19 @@ if [ "$NGPU" -lt 1 ]; then
 fi
 
 NATIVE_CTX=262144
-# Hybrid QSA: only 12/48 layers grow KV (~6 GiB f16 at 262k, ~12 GiB at 524k).
-# 2×80GB holds Q5_K_M + native 262k. YaRN past that is the 4× box.
+YARN_CTX=1048576
+# Hybrid QSA: only 12/48 layers grow KV (~6 GiB f16 at 262k, ~24 GiB at 1M).
+# 2×80GB holds Q5_K_M + native 262k. YaRN to 1M is the 4× box.
 if [ "$CTX_FORCE" != "1" ] && [ "$TOTAL_VRAM_MB" -lt 280000 ]; then
   if [ "$YARN" = "1" ] || [ "$CTX" -gt "$NATIVE_CTX" ]; then
     echo "VRAM ${TOTAL_VRAM_MB} MiB is below 4×80GB; native ${NATIVE_CTX} (no YaRN)"
-    echo "Rent 4× A100 for 524288, or set CTX_FORCE=1 to try anyway."
+    echo "Rent 4× A100 for ${YARN_CTX}, or set CTX_FORCE=1 to try anyway."
     YARN=0
     CTX=$NATIVE_CTX
   fi
 fi
 if [ "$YARN" = "1" ] && [ "$CTX" -le "$NATIVE_CTX" ]; then
-  CTX=524288
+  CTX=$YARN_CTX
 fi
 YARN_ARGS=()
 if [ "$YARN" = "1" ]; then
