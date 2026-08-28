@@ -50,9 +50,9 @@ esac
 if [ "$PKG" = "apt" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y curl ca-certificates gnupg openssl
+  apt-get install -y curl ca-certificates gnupg openssl python3
 else
-  dnf -y install dnf-plugins-core curl ca-certificates gnupg2 openssl
+  dnf -y install dnf-plugins-core curl ca-certificates gnupg2 openssl python3
 fi
 
 if [ -f /root/llama-api-key.txt ]; then
@@ -64,12 +64,14 @@ echo "$API_KEY" > /root/llama-api-key.txt
 chmod 600 /root/llama-api-key.txt
 
 if [ -z "$HF_TOKEN" ]; then
+  set +x
   for tokfile in /root/hf-token.txt /root/.cache/huggingface/token /root/.huggingface/token; do
     if [ -f "$tokfile" ]; then
       HF_TOKEN=$(tr -d '[:space:]' < "$tokfile")
       [ -n "$HF_TOKEN" ] && break
     fi
   done
+  set -x
 fi
 if [ -z "$HF_TOKEN" ]; then
   cat >&2 <<'ERR'
@@ -171,6 +173,55 @@ UNIT
 fi
 nvidia-smi
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+
+# Spheron (and similar) put a tiny OS disk on / and the real NVMe at /ephemeral.
+pick_big_disk() {
+  local d avail
+  for d in /ephemeral /mnt /data /opt/data; do
+    [ -d "$d" ] || continue
+    avail=$(df -B1 --output=avail "$d" 2>/dev/null | tail -n1 | tr -d ' ')
+    [ -n "$avail" ] && [ "$avail" -gt 200000000000 ] && { echo "$d"; return 0; }
+  done
+  return 1
+}
+
+set_docker_data_root() {
+  local root="$1"
+  mkdir -p "$root" /etc/docker
+  python3 - "$root" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+path = "/etc/docker/daemon.json"
+data = {}
+if os.path.exists(path) and os.path.getsize(path):
+    with open(path) as f:
+        data = json.load(f)
+data["data-root"] = root
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+}
+
+BIG_DISK=$(pick_big_disk || true)
+if [ -n "${BIG_DISK:-}" ]; then
+  echo "Using ${BIG_DISK} for models + Docker (OS disk is too small for this GGUF)"
+  mkdir -p "${BIG_DISK}/models" "${BIG_DISK}/docker"
+  if [ -e /models ] && [ ! -L /models ]; then
+    mv /models/* "${BIG_DISK}/models/" 2>/dev/null || true
+    rm -rf /models
+  fi
+  ln -sfn "${BIG_DISK}/models" /models
+  systemctl stop docker docker.socket 2>/dev/null || true
+  if [ -d /var/lib/docker ] && [ "$(ls -A /var/lib/docker 2>/dev/null || true)" ]; then
+    echo "Moving /var/lib/docker -> ${BIG_DISK}/docker"
+    cp -a /var/lib/docker/. "${BIG_DISK}/docker/"
+    rm -rf /var/lib/docker
+  fi
+  set_docker_data_root "${BIG_DISK}/docker"
+fi
+mkdir -p /models
+
 systemctl enable --now docker
 if command -v getenforce >/dev/null && [ "$(getenforce)" != "Disabled" ]; then
   setsebool -P container_use_devices 1 || true
@@ -191,6 +242,9 @@ if ! command -v nvidia-ctk >/dev/null; then
     dnf -y install nvidia-container-toolkit
   fi
   nvidia-ctk runtime configure --runtime=docker
+  if [ -n "${BIG_DISK:-}" ]; then
+    set_docker_data_root "${BIG_DISK}/docker"
+  fi
   systemctl restart docker
 fi
 
@@ -215,6 +269,9 @@ fi
 
 docker run --rm --gpus all "$IMAGE" --version || {
   nvidia-ctk runtime configure --runtime=docker
+  if [ -n "${BIG_DISK:-}" ]; then
+    set_docker_data_root "${BIG_DISK}/docker"
+  fi
   systemctl restart docker
   docker run --rm --gpus all "$IMAGE" --version
 }
@@ -240,26 +297,59 @@ case "$QUANT" in
 esac
 
 mkdir -p /models
-dl() { # filename expected_bytes
-  local f="/models/$1"
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -eq "$2" ]; then return 0; fi
-  if [ -f "$f" ]; then
-    echo "incomplete $f ($(stat -c%s "$f") bytes) — deleting and restarting"
-    rm -f "$f"
+NEED=0
+for spec in "${PARTS[@]}" "$MMPROJ_FILE:$MMPROJ_SIZE"; do
+  f="/models/${spec%%:*}"
+  want=${spec##*:}
+  have=0
+  [ -f "$f" ] && have=$(stat -c%s "$f")
+  if [ "$have" -lt "$want" ]; then
+    NEED=$((NEED + want - have))
   fi
+done
+NEED=$((NEED + 2147483648))
+AVAIL=$(df -B1 --output=avail /models | tail -n1 | tr -d ' ')
+echo "Download needs ~${NEED} more bytes; /models has ${AVAIL} free ($(df -h /models | tail -n1))"
+if [ "$AVAIL" -lt "$NEED" ]; then
+  echo "Not enough disk on $(readlink -f /models || echo /models). On Spheron use /ephemeral (1.5T), not the 96G OS disk." >&2
+  df -h
+  exit 1
+fi
+
+dl() { # filename expected_bytes
+  local f="/models/$1" sz rc=0
+  if [ -f "$f" ]; then
+    sz=$(stat -c%s "$f")
+    if [ "$sz" -eq "$2" ]; then return 0; fi
+    if [ "$sz" -lt 1048576 ]; then
+      echo "junk $f ($sz bytes) — deleting (failed HTML/401 stub)"
+      rm -f "$f"
+    else
+      echo "resuming $f ($sz / $2 bytes)"
+    fi
+  fi
+  set +x
   curl -fL --retry 10 --retry-delay 5 --retry-connrefused -C - \
     -H "Authorization: Bearer ${HF_TOKEN}" \
     -o "$f" \
-    "https://huggingface.co/${REPO}/resolve/main/$1?download=true"
-  [ "$(stat -c%s "$f")" -eq "$2" ] || { echo "SIZE MISMATCH: $f"; exit 1; }
+    "https://huggingface.co/${REPO}/resolve/main/$1?download=true" || rc=$?
+  set -x
+  if [ "$rc" -ne 0 ]; then
+    echo "curl failed rc=$rc writing $f" >&2
+    df -h
+    exit "$rc"
+  fi
+  [ "$(stat -c%s "$f")" -eq "$2" ] || { echo "SIZE MISMATCH: $f"; df -h; exit 1; }
 }
 
 hf_probe="${PARTS[0]%%:*}"
 echo "Probing Hugging Face auth for ${hf_probe}"
+set +x
 hf_code=$(curl -sS -o /tmp/hf-probe.body -w "%{http_code}" -L --max-time 30 \
   -H "Authorization: Bearer ${HF_TOKEN}" \
   "https://huggingface.co/${REPO}/resolve/main/${hf_probe}?download=true" \
   -r 0-0 || true)
+set -x
 if [ "$hf_code" != "200" ] && [ "$hf_code" != "206" ]; then
   echo "Hugging Face refused the download (HTTP ${hf_code})." >&2
   echo "Accept the model terms while logged in, then use a READ token." >&2

@@ -41,8 +41,8 @@ per GPU). You need **~150 GiB+ VRAM for all-GPU Q5_K_M**, or **~80 GiB VRAM +
 | RTX 4090 24GB / 5090 32GB | 24–32 GB | — | No | $0.53–$0.86 | Need 5–6 cards and still a bad fit |
 
 **Rent 2× A100 80GB on Spheron.** Same family as the 27B box, ~$2.86/hr, 160 GB
-VRAM, lots of host RAM, ~3 TB disk (the GGUF is 125 GiB). Spot A100 is ~$1.15/GPU
-(~$2.30/hr for two) if you can tolerate preemption.
+VRAM. The OS disk is only **~96 GB**; the large NVMe is **`/ephemeral` (~1.5 TB)**.
+The installer puts models and Docker there. Do not download GGUFs to `/`.
 
 Do **not** use a 1× 80 GB A100 for this quant. The 27B Q8_0 setup does not apply.
 
@@ -71,13 +71,19 @@ printf '%s\n' 'hf_YOUR_TOKEN' > /root/hf-token.txt
 chmod 600 /root/hf-token.txt
 ```
 
-A token without accepting the terms still 401s. If a previous run left a tiny junk file:
+A token without accepting the terms still 401s.
+
+`curl: (23) Failure writing output` on this Spheron SKU means **`/` is full**.
+`/dev/vda1` is ~96 GB; the 1.5 TB disk is `/ephemeral`. If that already happened:
 
 ```bash
-rm -f /models/Qwen3.8-Flash-Next-Uncensored-Q5_K_M-*.gguf
-bash /usr/local/sbin/llama-setup.sh >> /root/llama-setup.log 2>&1 &
+pkill -f llama-setup.sh || true
+# keep the large partials — do not rm the 40GB files
+curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-flash-next-3063/cloudinit/qwen-3.8-flash-next/bash_setup.sh | bash
 tail -f /root/llama-setup.log
 ```
+
+The updated script moves `/models` and Docker’s data-root to `/ephemeral` and resumes part 2.
 
 ## Deploy (Spheron: use bash)
 
