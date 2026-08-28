@@ -8,10 +8,10 @@ bearer token.
 
 This is a **177B-param MoE** (`qwen4exp`: 512 experts, ~6B active, plus a ~51B
 PLE n-gram table). It is **not** the 27B Qwen 3.8 in [`../qwen-3.8/`](../qwen-3.8/).
-A single 80 GB card cannot hold 5-bit weights. **2× A100** holds Q5_K_M at **64k**
-context. **4× A100** is what you want for native **262144**.
+A single 80 GB card cannot hold 5-bit weights. **2× A100** holds Q5_K_M at the
+native **262144** window. **4× A100** is the default: **YaRN ×2 to 524288**.
 
-## Spheron GPU: 4× A100 for 262k context
+## Spheron GPU: 4× A100 for 524k context
 
 **There is no 6-bit GGUF.** Q6_K / Q8 would make the PLE tensor larger than
 Hugging Face’s 50 GB per-file cap, so this repo tops out at **Q5_K_M**.
@@ -23,16 +23,17 @@ Weights + projector:
 | **Q5_K_M** (default) | **125 GiB** (134 GB decimal, 3 parts) | Highest fidelity in this repo |
 | Q5_K_S | 119 GiB | Slightly smaller 5-bit |
 
-Budget **file size + KV + CUDA overhead**. Q5_K_M weights are ~125 GiB. Native
-262k KV needs the extra cards, not a bigger quant.
+KV is cheap on this architecture: only **12 of 48 layers** grow a cache
+(~6 GiB f16 at 262k, ~12 GiB at 524k). The extra cards are for YaRN headroom
+and faster prefill, not because 262k KV is 160 GB.
 
 | Spheron box | VRAM | CTX this script uses | ~$/hr | Verdict |
 |---|---|---|---|---|
-| **4× A100 80GB** | 320 GB | **262144** | **~$5.72** | **Default for long OpenCode sessions** |
-| 2× A100 80GB | 160 GB | auto-cap **65536** | ~$2.86 | Fits weights; 262k KV OOMs |
+| **4× A100 80GB** | 320 GB | **524288** (YaRN ×2) | **~$5.72** | **Default for long OpenCode sessions** |
+| 2× A100 80GB | 160 GB | native **262144** | ~$2.86 | Fits weights + native KV |
 | 1× A100 80GB | 80 GB | — | ~$1.43 | OOM even at Q5 |
-| 2× H100 80GB | 160 GB | 65536 | ~$5.30 | Same VRAM as 2× A100, not 262k |
-| 4× H100 80GB | 320 GB | 262144 | ~$10.60 | Faster than 4× A100, not cheaper |
+| 2× H100 80GB | 160 GB | 262144 | ~$5.30 | Same VRAM as 2× A100 |
+| 4× H100 80GB | 320 GB | 524288 | ~$10.60 | Faster than 4× A100, not cheaper |
 
 **Rent 4× A100 80GB on Spheron** (~4 × $1.43/hr). PCIe is fine; llama.cpp splits
 layers across GPUs (`--gpus all`). The OS disk is still **~96 GB**; the large
@@ -40,6 +41,11 @@ NVMe is **`/ephemeral`**. The installer puts models and Docker there.
 
 The installer pins `per_layer_token_embd.weight` to CPU when total VRAM is under
 ~150 GiB. On 2× or 4× 80GB it stays on GPU.
+
+Qwen documents native **262144**, extensible to **1M** with YaRN factor 4.
+Static YaRN can hurt short prompts, so the default is factor **2** (524288),
+same recipe as the 27B servers. For 1M, set `CTX=1048576` in
+`/usr/local/sbin/llama-setup.sh` and re-run (rope-scale becomes 4).
 
 ## llama.cpp version
 
@@ -49,6 +55,11 @@ The installer pins `per_layer_token_embd.weight` to CPU when total VRAM is under
 'qwen4_exp'`. This script **builds llama-server from llama.cpp master** in Docker
 (`BUILD_LLAMA=1`). Set `BUILD_LLAMA=0` to pull GHCR instead once you know that
 tag is new enough. Host CUDA toolkit is still not required.
+
+The image also applies the two-line QSA indexer RMS-norm swap from
+[llama.cpp#27835](https://github.com/ggml-org/llama.cpp/issues/27835) so CUDA
+does not abort at `n_kv >= 262144` (`gridDim.y` overflow). Without that patch,
+even the native window dies on the last few tokens.
 
 ## Hugging Face token (required)
 
@@ -81,7 +92,7 @@ The updated script moves `/models` and Docker’s data-root to `/ephemeral` and 
 
 ```bash
 # as root — Ubuntu 22.04/24.04 or AlmaLinux / Rocky / RHEL 8–10
-# 4× A100 80GB for 262k, /root/hf-token.txt already written
+# 4× A100 80GB for 524k YaRN, /root/hf-token.txt already written
 curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-flash-next-3063/cloudinit/qwen-3.8-flash-next/bash_setup.sh | bash
 tail -f /root/llama-setup.log
 ```
@@ -102,7 +113,7 @@ curl -H "Authorization: Bearer <token>" http://<instance-ip>:8080/v1/models
 
 - Base URL: `http://<instance-ip>:8080/v1`
 - Model ID: `qwen3.8-flash-next-uncensored`
-- Context default: **262144** on 4×80GB (auto-caps to **65536** on 2×80GB)
+- Context default: **524288** (YaRN ×2) on 4×80GB; native **262144** on 2×80GB
 - Sampling (thinking): temp 1.0, top_p 0.95, top_k 20, min_p 0.0
 - OpenCode `reasoning_effort`: `low` / `medium` / `xhigh` (not `high`)
 
@@ -111,7 +122,7 @@ OpenCode snippet for a second provider alongside the 27B A100:
 ```json
 "llama-flash": {
   "npm": "@ai-sdk/openai-compatible",
-      "name": "Qwen 3.8 Flash-Next (4x A100)",
+  "name": "Qwen 3.8 Flash-Next (4x A100)",
   "options": {
     "baseURL": "http://<flash-next-ip>:8080/v1",
     "apiKey": "<token>"
@@ -120,7 +131,7 @@ OpenCode snippet for a second provider alongside the 27B A100:
     "qwen3.8-flash-next-uncensored": {
       "name": "Qwen3.8-Flash-Next Uncensored",
       "id": "qwen3.8-flash-next-uncensored",
-          "limit": { "context": 262144, "output": 32768 },
+      "limit": { "context": 524288, "output": 32768 },
       "modalities": { "input": ["text", "image"] },
       "options": {
         "temperature": 1.0,

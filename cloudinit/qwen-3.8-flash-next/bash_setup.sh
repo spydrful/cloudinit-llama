@@ -5,8 +5,9 @@
 #
 # Qwen3.8-Flash-Next Uncensored GGUF (qwen4exp). Needs llama.cpp from 2026-08-27+
 # (PR #27742). Default quant is Q5_K_M (~125 GiB). There is no Q6 — the PLE
-# tensor would exceed HF's 50 GB file cap. Target box: 4× A100 80GB (native 262k).
-# 2×80GB still works; CTX auto-drops to 65536.
+# tensor would exceed HF's 50 GB file cap. Target box: 4× A100 80GB.
+# Native window is 262144; default is YaRN ×2 to 524288. 2×80GB keeps native 262k
+# (hybrid KV is ~6 GiB at 262k — only 12 of 48 layers grow a cache).
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -29,8 +30,9 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=262144                   # native max. Caps to 65536 if VRAM < ~280 GB unless CTX_FORCE=1
-CTX_FORCE=0                  # 1 = keep CTX even on 2×80GB (may OOM)
+CTX=524288                   # YaRN ×2. Native 262144. 1048576 = 1M (factor 4)
+YARN=1                       # 0 = native window only (no RoPE scaling)
+CTX_FORCE=0                  # 1 = keep CTX/YARN even on 2×80GB
 QUANT=Q5_K_M                 # Q5_K_M (highest) or Q5_K_S (a bit smaller)
 PLE_CPU=""                   # 1 = pin n-gram table to host RAM; auto if VRAM < ~150 GiB
 BUILD_LLAMA=1                # 1 = build llama-server from llama.cpp master (qwen4exp)
@@ -253,13 +255,47 @@ fi
 if [ "$BUILD_LLAMA" = "1" ]; then
   IMAGE=llama-qwen4exp:local
   mkdir -p /tmp/llama-docker
+  # llama.cpp #27835/#27871: QSA indexer RMS-norm puts n_blocks on CUDA gridDim.y
+  # (limit 65535), so n_kv>=262144 aborts with "invalid argument". Swap so the
+  # large count lands on gridDim.x. Idempotent if master already has the fix.
+  cat > /tmp/llama-docker/patch_qwen4exp.py <<'PY'
+from pathlib import Path
+import re
+import sys
+
+p = Path("src/models/qwen4exp.cpp")
+t = p.read_text()
+if "n_blocks*n_stream overflows at n_kv" in t or "normalize before flattening" in t:
+    print("qwen4exp indexer RMS-norm already patched")
+    sys.exit(0)
+pat = re.compile(
+    r"([ \t]*)// rope wants \[n_dims, n_head, n_tokens\]: lay every stream's blocks flat, split after\.\n"
+    r"([ \t]*)pooled = ggml_reshape_3d\(ctx0, pooled, idx_dim, 1, n_blocks\*n_stream\);\n"
+    r"([ \t]*)pooled = build_norm\(pooled, model\.layers\[il\]\.index_k_norm, nullptr, LLM_NORM_RMS, il\);"
+)
+m = pat.search(t)
+if not m:
+    sys.exit("qwen4exp.cpp indexer RMS-norm pattern not found")
+ind = m.group(1)
+new = (
+    f"{ind}// normalize before flattening: rms_norm puts ne[1] on gridDim.x but ne[2]\n"
+    f"{ind}// on gridDim.y (limit 65535). n_blocks*n_stream overflows at n_kv>=262144 (#27835).\n"
+    f"{ind}pooled = build_norm(pooled, model.layers[il].index_k_norm, nullptr, LLM_NORM_RMS, il);\n"
+    f"{ind}// rope wants [n_dims, n_head, n_tokens]: lay every stream's blocks flat, split after.\n"
+    f"{ind}pooled = ggml_reshape_3d(ctx0, pooled, idx_dim, 1, n_blocks*n_stream);"
+)
+p.write_text(t[: m.start()] + new + t[m.end() :])
+print("patched qwen4exp indexer RMS-norm order")
+PY
   cat > /tmp/llama-docker/Dockerfile <<'DF'
 FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    git cmake build-essential curl ca-certificates libcurl4-openssl-dev \
+    git cmake build-essential curl ca-certificates libcurl4-openssl-dev python3 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git .
+COPY patch_qwen4exp.py /tmp/patch_qwen4exp.py
+RUN python3 /tmp/patch_qwen4exp.py
 RUN cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF \
     && cmake --build build -j"$(nproc)" --config Release --target llama-server
 ENTRYPOINT ["/src/build/bin/llama-server"]
@@ -378,15 +414,31 @@ if [ "$NGPU" -lt 1 ]; then
   exit 1
 fi
 
-# 4× A100 80GB ≈ 327680 MiB. Native 262k KV needs that extra ~160 GB over 2×.
-# 2×80GB keeps Q5_K_M on GPU but 262k KV OOMs — drop to 64k unless CTX_FORCE=1.
-if [ "$CTX_FORCE" != "1" ] && [ "$CTX" -gt 65536 ] && [ "$TOTAL_VRAM_MB" -lt 280000 ]; then
-  echo "VRAM ${TOTAL_VRAM_MB} MiB is below 4×80GB; capping CTX ${CTX} -> 65536"
-  echo "Rent 4× A100 for 262144, or set CTX_FORCE=1 to try anyway."
-  CTX=65536
+NATIVE_CTX=262144
+# Hybrid QSA: only 12/48 layers grow KV (~6 GiB f16 at 262k, ~12 GiB at 524k).
+# 2×80GB holds Q5_K_M + native 262k. YaRN past that is the 4× box.
+if [ "$CTX_FORCE" != "1" ] && [ "$TOTAL_VRAM_MB" -lt 280000 ]; then
+  if [ "$YARN" = "1" ] || [ "$CTX" -gt "$NATIVE_CTX" ]; then
+    echo "VRAM ${TOTAL_VRAM_MB} MiB is below 4×80GB; native ${NATIVE_CTX} (no YaRN)"
+    echo "Rent 4× A100 for 524288, or set CTX_FORCE=1 to try anyway."
+    YARN=0
+    CTX=$NATIVE_CTX
+  fi
 fi
-if [ "$NGPU" -ge 4 ]; then
-  echo "4+ GPUs: CTX=$CTX (native Flash-Next window)"
+if [ "$YARN" = "1" ] && [ "$CTX" -le "$NATIVE_CTX" ]; then
+  CTX=524288
+fi
+YARN_ARGS=()
+if [ "$YARN" = "1" ]; then
+  ROPE_SCALE=$(awk -v c="$CTX" -v n="$NATIVE_CTX" 'BEGIN{printf "%.8g", c/n}')
+  # llama-server otherwise caps slots at n_ctx_train (262144).
+  YARN_ARGS=(
+    --rope-scaling yarn --rope-scale "$ROPE_SCALE" --yarn-orig-ctx "$NATIVE_CTX"
+    --override-kv "qwen4exp.context_length=int:${CTX}"
+  )
+  echo "YaRN: CTX=$CTX rope-scale=$ROPE_SCALE orig=$NATIVE_CTX"
+elif [ "$NGPU" -ge 4 ]; then
+  echo "4+ GPUs: CTX=$CTX (native Flash-Next window, YARN=0)"
 fi
 
 PLE_ARGS=()
@@ -414,6 +466,7 @@ docker run -d --name llama --restart unless-stopped --gpus all \
   --threads "$THREADS" --threads-http "$HTTP_THREADS" \
   --image-min-tokens 1024 --reasoning-preserve \
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \
+  "${YARN_ARGS[@]}" \
   "${PLE_ARGS[@]}"
 
 if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
@@ -426,7 +479,7 @@ rm -f /etc/systemd/system/llama-setup-continue.service
 systemctl daemon-reload 2>/dev/null || true
 
 echo "DONE. API key: $API_KEY"
-echo "Model: $MODEL_FILE  ctx=$CTX  gpus=$NGPU"
+echo "Model: $MODEL_FILE  ctx=$CTX  yarn=$YARN  gpus=$NGPU"
 SETUP_EOF
 
 chmod 755 /usr/local/sbin/llama-setup.sh
