@@ -8,9 +8,10 @@ bearer token.
 
 This is a **177B-param MoE** (`qwen4exp`: 512 experts, ~6B active, plus a ~51B
 PLE n-gram table). It is **not** the 27B Qwen 3.8 in [`../qwen-3.8/`](../qwen-3.8/).
-A single 80 GB card cannot hold 5-bit weights.
+A single 80 GB card cannot hold 5-bit weights. **2× A100** holds Q5_K_M at **64k**
+context. **4× A100** is what you want for native **262144**.
 
-## Spheron GPU: cheapest that can run 5-bit
+## Spheron GPU: 4× A100 for 262k context
 
 **There is no 6-bit GGUF.** Q6_K / Q8 would make the PLE tensor larger than
 Hugging Face’s 50 GB per-file cap, so this repo tops out at **Q5_K_M**.
@@ -22,32 +23,23 @@ Weights + projector:
 | **Q5_K_M** (default) | **125 GiB** (134 GB decimal, 3 parts) | Highest fidelity in this repo |
 | Q5_K_S | 119 GiB | Slightly smaller 5-bit |
 
-Budget **file size + KV + CUDA overhead**. Unsloth’s 5-bit row is ~200 GB *total*
-memory (RAM+VRAM) if you include runtime state.
+Budget **file size + KV + CUDA overhead**. Q5_K_M weights are ~125 GiB. Native
+262k KV needs the extra cards, not a bigger quant.
 
-Live Spheron on-demand (Aug 2026, [pricing](https://www.spheron.network/pricing/),
-per GPU). You need **~150 GiB+ VRAM for all-GPU Q5_K_M**, or **~80 GiB VRAM +
-≥64 GB host RAM** if the PLE table is pinned to CPU:
+| Spheron box | VRAM | CTX this script uses | ~$/hr | Verdict |
+|---|---|---|---|---|
+| **4× A100 80GB** | 320 GB | **262144** | **~$5.72** | **Default for long OpenCode sessions** |
+| 2× A100 80GB | 160 GB | auto-cap **65536** | ~$2.86 | Fits weights; 262k KV OOMs |
+| 1× A100 80GB | 80 GB | — | ~$1.43 | OOM even at Q5 |
+| 2× H100 80GB | 160 GB | 65536 | ~$5.30 | Same VRAM as 2× A100, not 262k |
+| 4× H100 80GB | 320 GB | 262144 | ~$10.60 | Faster than 4× A100, not cheaper |
 
-| Spheron box | VRAM | Host RAM (listed SKU) | All-GPU Q5_K_M? | ~$/hr | Verdict |
-|---|---|---|---|---|---|
-| **2× A100 80GB** | 160 GB | 480 GB | **Yes** | **~$2.86** | **Best cheap default** |
-| 1× RTX PRO 6000 96GB | 96 GB | 360 GB | No — PLE → RAM | ~$2.31 | Cheapest *if* you accept CPU PLE + shorter context |
-| 3× L40S 48GB | 144 GB | 72 GB | Tight; RAM is low for PLE | ~$2.88 | Skip unless the SKU has more RAM |
-| 1× H200 141GB | 141 GB | 1800 GB | Tight; script will PLE→RAM | ~$4.79 | Simpler single GPU, not cheaper |
-| 2× H100 80GB | 160 GB | 180 GB | Yes | ~$5.30 | Faster than A100, not cheaper |
-| 1× B200 192GB | 192 GB | 2048 GB | Yes | ~$7.20 | Easy, expensive |
-| 1× A100 80GB | 80 GB | 480 GB | No | ~$1.43 | Will OOM at Q5 even with PLE offload |
-| RTX 4090 24GB / 5090 32GB | 24–32 GB | — | No | $0.53–$0.86 | Need 5–6 cards and still a bad fit |
-
-**Rent 2× A100 80GB on Spheron.** Same family as the 27B box, ~$2.86/hr, 160 GB
-VRAM. The OS disk is only **~96 GB**; the large NVMe is **`/ephemeral` (~1.5 TB)**.
-The installer puts models and Docker there. Do not download GGUFs to `/`.
-
-Do **not** use a 1× 80 GB A100 for this quant. The 27B Q8_0 setup does not apply.
+**Rent 4× A100 80GB on Spheron** (~4 × $1.43/hr). PCIe is fine; llama.cpp splits
+layers across GPUs (`--gpus all`). The OS disk is still **~96 GB**; the large
+NVMe is **`/ephemeral`**. The installer puts models and Docker there.
 
 The installer pins `per_layer_token_embd.weight` to CPU when total VRAM is under
-~150 GiB (PRO 6000, H200, single A100). On 2×80GB it stays on GPU.
+~150 GiB. On 2× or 4× 80GB it stays on GPU.
 
 ## llama.cpp version
 
@@ -89,7 +81,7 @@ The updated script moves `/models` and Docker’s data-root to `/ephemeral` and 
 
 ```bash
 # as root — Ubuntu 22.04/24.04 or AlmaLinux / Rocky / RHEL 8–10
-# 2× A100 80GB, ~200 GB free disk, /root/hf-token.txt already written
+# 4× A100 80GB for 262k, /root/hf-token.txt already written
 curl -fsSL https://raw.githubusercontent.com/spydrful/cloudinit-llama/cursor/qwen38-flash-next-3063/cloudinit/qwen-3.8-flash-next/bash_setup.sh | bash
 tail -f /root/llama-setup.log
 ```
@@ -110,8 +102,7 @@ curl -H "Authorization: Bearer <token>" http://<instance-ip>:8080/v1/models
 
 - Base URL: `http://<instance-ip>:8080/v1`
 - Model ID: `qwen3.8-flash-next-uncensored`
-- Context default in the script: **65536** (native 262144 — raise `CTX` if VRAM
-  allows)
+- Context default: **262144** on 4×80GB (auto-caps to **65536** on 2×80GB)
 - Sampling (thinking): temp 1.0, top_p 0.95, top_k 20, min_p 0.0
 - OpenCode `reasoning_effort`: `low` / `medium` / `xhigh` (not `high`)
 
@@ -120,7 +111,7 @@ OpenCode snippet for a second provider alongside the 27B A100:
 ```json
 "llama-flash": {
   "npm": "@ai-sdk/openai-compatible",
-  "name": "Qwen 3.8 Flash-Next",
+      "name": "Qwen 3.8 Flash-Next (4x A100)",
   "options": {
     "baseURL": "http://<flash-next-ip>:8080/v1",
     "apiKey": "<token>"
@@ -129,7 +120,7 @@ OpenCode snippet for a second provider alongside the 27B A100:
     "qwen3.8-flash-next-uncensored": {
       "name": "Qwen3.8-Flash-Next Uncensored",
       "id": "qwen3.8-flash-next-uncensored",
-      "limit": { "context": 65536, "output": 16384 },
+          "limit": { "context": 262144, "output": 32768 },
       "modalities": { "input": ["text", "image"] },
       "options": {
         "temperature": 1.0,

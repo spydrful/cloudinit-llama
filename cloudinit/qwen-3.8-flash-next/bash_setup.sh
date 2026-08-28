@@ -5,7 +5,8 @@
 #
 # Qwen3.8-Flash-Next Uncensored GGUF (qwen4exp). Needs llama.cpp from 2026-08-27+
 # (PR #27742). Default quant is Q5_K_M (~125 GiB). There is no Q6 — the PLE
-# tensor would exceed HF's 50 GB file cap. Target box: 2× A100 80GB.
+# tensor would exceed HF's 50 GB file cap. Target box: 4× A100 80GB (native 262k).
+# 2×80GB still works; CTX auto-drops to 65536.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -28,7 +29,8 @@ set -euxo pipefail
 ##### EDIT ME ##################################################
 API_KEY="CHANGE-ME"          # if left as-is, random one -> /root/llama-api-key.txt
 PORT=8080
-CTX=65536                    # native max is 262144; raise if VRAM allows
+CTX=262144                   # native max. Caps to 65536 if VRAM < ~280 GB unless CTX_FORCE=1
+CTX_FORCE=0                  # 1 = keep CTX even on 2×80GB (may OOM)
 QUANT=Q5_K_M                 # Q5_K_M (highest) or Q5_K_S (a bit smaller)
 PLE_CPU=""                   # 1 = pin n-gram table to host RAM; auto if VRAM < ~150 GiB
 BUILD_LLAMA=1                # 1 = build llama-server from llama.cpp master (qwen4exp)
@@ -374,6 +376,17 @@ echo "GPUs=${NGPU} total_vram_mib=${TOTAL_VRAM_MB}"
 if [ "$NGPU" -lt 1 ]; then
   echo "No NVIDIA GPU visible" >&2
   exit 1
+fi
+
+# 4× A100 80GB ≈ 327680 MiB. Native 262k KV needs that extra ~160 GB over 2×.
+# 2×80GB keeps Q5_K_M on GPU but 262k KV OOMs — drop to 64k unless CTX_FORCE=1.
+if [ "$CTX_FORCE" != "1" ] && [ "$CTX" -gt 65536 ] && [ "$TOTAL_VRAM_MB" -lt 280000 ]; then
+  echo "VRAM ${TOTAL_VRAM_MB} MiB is below 4×80GB; capping CTX ${CTX} -> 65536"
+  echo "Rent 4× A100 for 262144, or set CTX_FORCE=1 to try anyway."
+  CTX=65536
+fi
+if [ "$NGPU" -ge 4 ]; then
+  echo "4+ GPUs: CTX=$CTX (native Flash-Next window)"
 fi
 
 PLE_ARGS=()
